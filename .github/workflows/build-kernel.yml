@@ -12,6 +12,8 @@
 #   - earth.dtbo    dtbo 覆盖层（刷 dtbo_b）
 #   - build.log     完整构建日志
 #   - AnyKernel3 zip（可选，自动打，刷 boot 用，自动处理 A/B 槽）
+#
+# 触发方式：仅 workflow_dispatch（手动），不会被 push/PR 自动触发。
 # ============================================================================
 name: Build earth Kernel
 
@@ -151,43 +153,24 @@ jobs:
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3 -b master ak3 2>/dev/null \
             || { echo "::warning::AnyKernel3 下载失败，跳过打包（内核产物不受影响）"; exit 0; }
           cp "$IMG" ak3/Image.gz-dtb
-          cat > ak3/anykernel.sh <<'EOF'
-### AnyKernel3 Ramdisk Mod Script
-## osm0sis @ xda-developers
-
-### AnyKernel setup
-properties() { '
-kernel.string=Earth Kernel (4.19.325 KSU-Next) built by GitHub Actions
-do.devicecheck=0
-do.modules=0
-do.systemless=1
-do.cleanup=1
-do.cleanuponabort=0
-supported.versions=
-supported.patchlevels=
-supported.vendorpatchlevels=
-'; } # end properties
-
-### AnyKernel install
-boot_attributes() {
-  set_perm_recursive 0 0 755 644 $RAMDISK/*;
-  set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
-} # end attributes
-
-# boot shell variables
-BLOCK=auto;
-IS_SLOT_DEVICE=auto;
-RAMDISK_COMPRESSION=auto;
-PATCH_VBMETA_FLAG=auto;
-
-# import functions/variables and setup patching - see for reference (DO NOT REMOVE)
-. tools/ak3-core.sh;
-
-# boot install
-dump_boot;
-write_boot;
-## end boot install
-EOF
+          printf '%s\n' \
+            '### AnyKernel3 Ramdisk Mod Script' \
+            '## for Xiaomi Redmi 12C / Poco C55 (earth, MT6768) - A/B slot device' \
+            '' \
+            '# boot shell variables' \
+            'BLOCK=auto;' \
+            'IS_SLOT_DEVICE=auto;' \
+            'RAMDISK_COMPRESSION=auto;' \
+            'PATCH_VBMETA_FLAG=auto;' \
+            '' \
+            '# import functions/variables and setup patching - see for reference (DO NOT REMOVE)' \
+            '. tools/ak3-core.sh;' \
+            '' \
+            '# boot install' \
+            'dump_boot;' \
+            'write_boot;' \
+            '## end boot install' \
+            > ak3/anykernel.sh
           (cd ak3 && zip -r9 ../AnyKernel3-earth.zip . -x '*.git*' '*.github*')
           unzip -t AnyKernel3-earth.zip >/dev/null
           echo "Packaged: $(ls -lh AnyKernel3-earth.zip | awk '{print $5, $9}')"
