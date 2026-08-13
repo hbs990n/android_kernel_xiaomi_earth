@@ -116,12 +116,15 @@ jobs:
           fi
 
       # ------------------------------------------------------------------
-      # 6. 全量编译内核 + dtbo（-k 模式一次性暴露全部错误）
+      # 6. 全量编译内核（-k 模式一次性暴露全部错误）
+      #    earth.dtbo 不用单独指定目标：make Image.gz-dtb 会经其依赖 dtbs
+      #    自动编出 earth.dtbo（arch/arm64/boot/dts/mediatek/Makefile 的
+      #    dtb-y += earth.dtbo）。单独 make .../earth.dtbo 反而会失败。
       #    产物：
       #      out/arch/arm64/boot/Image.gz-dtb   （内核 + mt6768 dtb）
       #      out/arch/arm64/boot/dts/mediatek/earth.dtbo（dtbo 覆盖层）
       # ------------------------------------------------------------------
-      - name: Build kernel and dtbo
+      - name: Build kernel (Image.gz-dtb + earth.dtbo via dtbs)
         run: |
           KEEP=""
           if [ "${{ inputs.keep_going }}" == "true" ]; then KEEP="-k"; fi
@@ -130,7 +133,6 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             $KEEP -j"$(nproc)" \
             Image.gz-dtb \
-            arch/arm64/boot/dts/mediatek/earth.dtbo \
             2>&1 | tee build.log
           rc=${PIPESTATUS[0]}
           set -e
@@ -199,13 +201,18 @@ jobs:
         if: always()
         run: |
           rc="${{ env.build_exit }}"
+          DTBO="$(find out -name earth.dtbo 2>/dev/null | head -1 || true)"
           if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
             echo "== 产物 =="
-            ls -lh out/arch/arm64/boot/Image.gz-dtb \
-                 out/arch/arm64/boot/dts/mediatek/earth.dtbo 2>/dev/null || true
+            ls -lh out/arch/arm64/boot/Image.gz-dtb 2>/dev/null || true
+            [ -n "$DTBO" ] && ls -lh "$DTBO" || true
             echo "== Image.gz-dtb 已验证存在 =="
           else
             echo "::error::Image.gz-dtb 未生成（构建失败）"
+            rc=1
+          fi
+          if [ -z "$DTBO" ]; then
+            echo "::error::earth.dtbo 未生成（构建失败）"
             rc=1
           fi
           if [ "${rc:-1}" != "0" ]; then
