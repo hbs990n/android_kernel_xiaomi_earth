@@ -8,7 +8,9 @@
 #     暴露所有编译错误；完整构建日志上传为 artifact 供排错迭代。
 #
 # 产物（artifact）：
-#   - Image.gz-dtb  内核 + mt6768 设备树（刷 boot_b）
+#   - Image.gz-dtb  内核 + mt6768 设备树拼接（刷 boot_b）
+#   - Image.gz / Image  普通内核（未拼接设备树）
+#   - mt6768.dtb    单独的设备树文件（就是拼接在 Image.gz 尾部那份）
 #   - earth.dtbo    dtbo 覆盖层（刷 dtbo_b）
 #   - build.log     完整构建日志
 #   - AnyKernel3 zip（可选，自动打，刷 boot 用，自动处理 A/B 槽）
@@ -187,6 +189,9 @@ jobs:
           name: earth-kernel-artifacts
           path: |
             out/arch/arm64/boot/Image.gz-dtb
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/dts/mediatek/mt6768.dtb
             out/arch/arm64/boot/dts/mediatek/earth.dtbo
             out/**/earth.dtbo
             build.log
@@ -202,9 +207,22 @@ jobs:
         run: |
           rc="${{ env.build_exit }}"
           DTBO="$(find out -name earth.dtbo 2>/dev/null | head -1 || true)"
+          for f in \
+            out/arch/arm64/boot/Image.gz-dtb \
+            out/arch/arm64/boot/Image.gz \
+            out/arch/arm64/boot/dts/mediatek/mt6768.dtb
+          do
+            if [ ! -f "$f" ]; then
+              echo "::error::缺少产物: $f"
+              rc=1
+            fi
+          done
           if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
             echo "== 产物 =="
-            ls -lh out/arch/arm64/boot/Image.gz-dtb 2>/dev/null || true
+            ls -lh out/arch/arm64/boot/Image.gz-dtb \
+                 out/arch/arm64/boot/Image.gz \
+                 out/arch/arm64/boot/Image \
+                 out/arch/arm64/boot/dts/mediatek/mt6768.dtb 2>/dev/null || true
             [ -n "$DTBO" ] && ls -lh "$DTBO" || true
             echo "== Image.gz-dtb 已验证存在 =="
           else
