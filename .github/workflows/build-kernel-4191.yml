@@ -17,6 +17,9 @@
 name: Build earth kernel 4.19.191 (touch-charger fix)
 
 on:
+  # push 触发：这样无需把工作流放到默认分支也能跑（默认分支保持干净）
+  push:
+    branches: [ earth-touch-fix ]
   workflow_dispatch:
     inputs:
       source_repo:
@@ -42,7 +45,12 @@ concurrency:
   group: build-earth-4191
   cancel-in-progress: true
 
+# push 触发时 inputs 为空，这里给出与 workflow_dispatch 一致的默认值
 env:
+  SRC_REPO: ${{ inputs.source_repo || 'https://github.com/MiCode/Xiaomi_Kernel_OpenSource' }}
+  SRC_BRANCH: ${{ inputs.source_branch || 'earth-s-oss' }}
+  LOCALVER: ${{ inputs.localversion || '-perf-gc92376a393a7' }}
+  LLVM_IAS_IN: ${{ inputs.use_llvm_ias || '0' }}
   CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r383902.tar.gz
 
 jobs:
@@ -52,10 +60,10 @@ jobs:
     steps:
       - name: Show inputs
         run: |
-          echo "repo      : ${{ inputs.source_repo }}"
-          echo "branch    : ${{ inputs.source_branch }}"
-          echo "localver  : ${{ inputs.localversion }}"
-          echo "LLVM_IAS  : ${{ inputs.use_llvm_ias }}"
+          echo "repo      : ${{ env.SRC_REPO }}"
+          echo "branch    : ${{ env.SRC_BRANCH }}"
+          echo "localver  : ${{ env.LOCALVER }}"
+          echo "LLVM_IAS  : ${{ env.LLVM_IAS_IN }}"
 
       # ------------------------------------------------------------------
       # 1. 拉取官方内核源码（浅克隆，取到指定分支头即可）
@@ -63,8 +71,8 @@ jobs:
       - name: Clone Xiaomi kernel source
         run: |
           set -e
-          git clone --depth 1 -b "${{ inputs.source_branch }}" \
-            "${{ inputs.source_repo }}" kernel
+          git clone --depth 1 -b "${{ env.SRC_BRANCH }}" \
+            "${{ env.SRC_REPO }}" kernel
           cd kernel
           echo "HEAD: $(git rev-parse HEAD)"
           head -5 Makefile
@@ -120,7 +128,7 @@ jobs:
           set -e
           cd kernel
           DEF=arch/arm64/configs/earth_defconfig
-          LV="${{ inputs.localversion }}"
+          LV="${{ env.LOCALVER }}"
           sed -i "s|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=\"${LV}\"|" "$DEF"
           sed -i "/^CONFIG_LOCALVERSION_AUTO=/d" "$DEF"
           grep -nE "CONFIG_LOCALVERSION" "$DEF"
@@ -154,7 +162,7 @@ jobs:
           cd kernel
           export LOCALVERSION=""
           EXTRA=""
-          if [ "${{ inputs.use_llvm_ias }}" = "1" ]; then EXTRA="LLVM_IAS=1"; fi
+          if [ "${{ env.LLVM_IAS_IN }}" = "1" ]; then EXTRA="LLVM_IAS=1"; fi
           make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
                CROSS_COMPILE=aarch64-linux-gnu- $EXTRA \
                -j"$(nproc)" Image.gz-dtb 2>&1 | tee build.log
