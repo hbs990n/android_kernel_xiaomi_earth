@@ -51,7 +51,10 @@ env:
   SRC_BRANCH: ${{ inputs.source_branch || 'earth-s-oss' }}
   LOCALVER: ${{ inputs.localversion || '-perf-gc92376a393a7' }}
   LLVM_IAS_IN: ${{ inputs.use_llvm_ias || '0' }}
-  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r383902.tar.gz
+  # 注意：refs/heads/main 上已经删掉了 clang-r383902（返回 400），
+  # 必须用固定 tag 取，这里用 android-11.0.0_r48，对应设备内核的
+  # "Android clang 11.0.1 based on r383902"。
+  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-11.0.0_r48/clang-r383902.tar.gz
 
 jobs:
   build:
@@ -92,8 +95,23 @@ jobs:
             libssl-dev libelf-dev device-tree-compiler cpio kmod \
             zip unzip python3 libtinfo5
           mkdir -p "$RUNNER_TEMP/clang"
-          curl -fsSL "$CLANG_URL" -o /tmp/clang.tar.gz
-          tar -xzf /tmp/clang.tar.gz -C "$RUNNER_TEMP/clang"
+          set +e
+          curl -fL --retry 4 --retry-all-errors --retry-delay 5 \
+               --connect-timeout 30 --max-time 900 \
+               "$CLANG_URL" -o /tmp/clang.tar.gz
+          RC=$?
+          set -e
+          if [ $RC -ne 0 ] || ! tar -tzf /tmp/clang.tar.gz >/dev/null 2>&1; then
+            echo "::warning::主 clang 源不可用(rc=$RC)，回退到 LineageOS 镜像 clang-r416183b"
+            rm -rf "$RUNNER_TEMP/clang"; mkdir -p "$RUNNER_TEMP/clang"
+            git clone --depth 1 \
+              https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b \
+              "$RUNNER_TEMP/clanggit"
+            cp -a "$RUNNER_TEMP/clanggit/." "$RUNNER_TEMP/clang/"
+          else
+            tar -xzf /tmp/clang.tar.gz -C "$RUNNER_TEMP/clang"
+          fi
+          ls "$RUNNER_TEMP/clang/bin" | head -5
           "$RUNNER_TEMP/clang/bin/clang" --version | head -1
           echo "$RUNNER_TEMP/clang/bin" >> "$GITHUB_PATH"
 
