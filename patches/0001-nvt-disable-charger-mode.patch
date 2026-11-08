@@ -1,0 +1,44 @@
+--- a/drivers/input/touchscreen/mediatek/nt36525b_spi/nt36xxx.c
++++ b/drivers/input/touchscreen/mediatek/nt36525b_spi/nt36xxx.c
+@@ -2769,13 +2769,17 @@
+ 
+ 	bTouchIsAwake = 1;
+ 	/*C3T code for HQ-224102 by chenzimo at 2022/8/25 start*/
+-	if (mt_get_charger_type() == CHARGER_UNKNOWN) {
+-		nvt_set_charger_switch(0);
+-		NVT_ERR("charger_switch = 0\n");
+-	} else {
+-		nvt_set_charger_switch(1);
+-		NVT_ERR("charger_switch = 1\n");
+-	}
++	/*
++	 * earth touch fix: keep the Novatek IC in NORMAL mode, never in
++	 * "charger mode".  When the IC accepts the charger-mode host command
++	 * (0x53) it stops asserting its INT line on this panel, so Android
++	 * receives no input events at all until something re-initialises the
++	 * IC (screen off/on, or a charger re-plug).  That is exactly the
++	 * "touchscreen dead while charging" bug on GSI builds.
++	 * Normal mode (0x51) is harmless on charger, so force it every resume.
++	 */
++	nvt_set_charger_switch(0);
++	NVT_ERR("earth-fix: charger_switch forced 0 (charger mode disabled)\n");
+ 	/*C3T code for HQ-224102 by chenzimo at 2022/8/25 end*/
+ 
+ 	/*C3T code for HQ-262331 by jishen at 2022/11/6 start*/
+--- a/drivers/input/touchscreen/mediatek/nt36525b_spi/nt36xxx_ext_proc.c
++++ b/drivers/input/touchscreen/mediatek/nt36525b_spi/nt36xxx_ext_proc.c
+@@ -1272,8 +1272,12 @@
+ 		ret = -EINVAL;
+ 		goto out;
+ 	}
+-	charger_switch = (uint8_t)tmp;
+-	NVT_LOG("charger_switch = %d\n", charger_switch);
++	/* earth touch fix: charger mode is permanently disabled; ignore any
++	 * request to enable it (it kills touch input on this panel). */
++	if (tmp != 0)
++		NVT_ERR("earth-fix: charger mode disabled, ignoring request %d\n", tmp);
++	charger_switch = 0;
++	NVT_LOG("earth-fix: charger_switch forced %d\n", charger_switch);
+ 
+ 	if (mutex_lock_interruptible(&ts->lock)) {
+ 		return -ERESTARTSYS;

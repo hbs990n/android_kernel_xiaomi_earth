@@ -1,0 +1,240 @@
+# =============================================================================
+# Build Xiaomi Redmi 12C (earth / MT6768) kernel 4.19.191 with the
+# "touchscreen dead while charging" fix applied.
+#
+# 为什么基于官方 earth-s-oss 源码，而不是本地那份 ksu-next(4.19.325)：
+#   - 设备两个槽位跑的其实都是官方 4.19.191 内核（编译者 builder@pangu-build-*）
+#   - vendor 分区里的 13 个 .ko 是按 4.19.191 编的，vermagic 必须是
+#     4.19.191-perf-gc92376a393a7，否则 WiFi/蓝牙/GPS/FM 全部加载失败
+#   - 4.19.325 的树编出来的内核 vermagic 对不上，刷进去 vendor 模块全废
+#
+# 修复内容（patches/0001-nvt-disable-charger-mode.patch）：
+#   永不向 Novatek 触控 IC 下发 "charger mode"(0x53)，恒发 0x51(正常模式)。
+#   这颗 IC 收到 0x53 后会停止拉中断，导致整屏无触控事件。
+#
+# 产物：Image.gz-dtb + earth.dtbo(若生成) + AnyKernel3 刷机包 + build.log
+# =============================================================================
+name: Build earth kernel 4.19.191 (touch-charger fix)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: '内核源码仓库'
+        required: false
+        default: 'https://github.com/MiCode/Xiaomi_Kernel_OpenSource'
+      source_branch:
+        description: '分支（earth-s-oss = 4.19.191 官方 S 基线）'
+        required: false
+        default: 'earth-s-oss'
+      localversion:
+        description: '强制 LOCALVERSION（用于匹配 vendor 模块 vermagic）'
+        required: false
+        default: '-perf-gc92376a393a7'
+      use_llvm_ias:
+        description: '用 clang 内置汇编器(LLVM_IAS=1)，默认用 GNU as'
+        required: false
+        default: '0'
+        type: choice
+        options: ['0', '1']
+
+concurrency:
+  group: build-earth-4191
+  cancel-in-progress: true
+
+env:
+  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r383902.tar.gz
+
+jobs:
+  build:
+    name: earth 4.19.191 + touch fix
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Show inputs
+        run: |
+          echo "repo      : ${{ inputs.source_repo }}"
+          echo "branch    : ${{ inputs.source_branch }}"
+          echo "localver  : ${{ inputs.localversion }}"
+          echo "LLVM_IAS  : ${{ inputs.use_llvm_ias }}"
+
+      # ------------------------------------------------------------------
+      # 1. 拉取官方内核源码（浅克隆，取到指定分支头即可）
+      # ------------------------------------------------------------------
+      - name: Clone Xiaomi kernel source
+        run: |
+          set -e
+          git clone --depth 1 -b "${{ inputs.source_branch }}" \
+            "${{ inputs.source_repo }}" kernel
+          cd kernel
+          echo "HEAD: $(git rev-parse HEAD)"
+          head -5 Makefile
+
+      # ------------------------------------------------------------------
+      # 2. 安装依赖 + AOSP prebuilt clang r383902（与设备内核编译器一致：
+      #    Android clang 11.0.1 based on r383902）
+      # ------------------------------------------------------------------
+      - name: Install deps and toolchain
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            git curl ca-certificates xz-utils \
+            bc bison flex make \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            libssl-dev libelf-dev device-tree-compiler cpio kmod \
+            zip unzip python3 libtinfo5
+          mkdir -p "$RUNNER_TEMP/clang"
+          curl -fsSL "$CLANG_URL" -o /tmp/clang.tar.gz
+          tar -xzf /tmp/clang.tar.gz -C "$RUNNER_TEMP/clang"
+          "$RUNNER_TEMP/clang/bin/clang" --version | head -1
+          echo "$RUNNER_TEMP/clang/bin" >> "$GITHUB_PATH"
+
+      # ------------------------------------------------------------------
+      # 3. 打补丁：禁用触控 IC 的 charger mode
+      #    用 patch 而不是 git apply，之后可以删掉 .git，
+      #    避免 setlocalversion 追加 "+"/"-dirty" 污染 vermagic
+      # ------------------------------------------------------------------
+      - name: Apply touch charger-mode fix
+        run: |
+          set -e
+          # 补丁放在本仓库 patches/ 下，用 raw 直接取，避免 clone 1.5G 的大仓库
+          RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/patches/0001-nvt-disable-charger-mode.patch"
+          curl -fsSL "$RAW" -o /tmp/touchfix.patch
+          echo "--- 补丁内容 ---"; cat /tmp/touchfix.patch
+          cd kernel
+          patch -p1 --verbose < /tmp/touchfix.patch
+          echo "--- 校验修改点 ---"
+          grep -n "earth-fix" drivers/input/touchscreen/mediatek/nt36525b_spi/nt36xxx.c
+          grep -n "earth-fix" drivers/input/touchscreen/mediatek/nt36525b_spi/nt36xxx_ext_proc.c
+          rm -rf .git
+
+      # ------------------------------------------------------------------
+      # 4. 配置：锁死 LOCALVERSION，关闭 MODVERSIONS
+      #    - LOCALVERSION 必须精确等于设备 vendor 模块要求的
+      #      4.19.191-perf-gc92376a393a7
+      #    - MODVERSIONS 关掉，避免与新版本内核的符号 CRC 不一致
+      #      （关闭后内核不做 CRC 校验，只校验 vermagic 字符串）
+      # ------------------------------------------------------------------
+      - name: Configure kernel
+        run: |
+          set -e
+          cd kernel
+          DEF=arch/arm64/configs/earth_defconfig
+          LV="${{ inputs.localversion }}"
+          sed -i "s|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=\"${LV}\"|" "$DEF"
+          sed -i "/^CONFIG_LOCALVERSION_AUTO=/d" "$DEF"
+          grep -nE "CONFIG_LOCALVERSION" "$DEF"
+          export LOCALVERSION=""
+          MAKE_ARGS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-"
+          make $MAKE_ARGS earth_defconfig
+          # 关掉 MODVERSIONS（若被默认打开）
+          scripts/config --file out/.config -d MODVERSIONS
+          scripts/config --file out/.config -d MODVERSIONS_ALL
+          make $MAKE_ARGS olddefconfig
+          echo "--- 关键配置 ---"
+          grep -E "^CONFIG_(LOCALVERSION|MODVERSIONS|MODULE_SIG|MODULE_SIG_FORCE)" out/.config || true
+          if grep -q "^CONFIG_MODVERSIONS=y" out/.config; then
+            echo "::error::CONFIG_MODVERSIONS 仍为 y，vendor 模块可能因 CRC 不匹配加载失败"
+            exit 1
+          fi
+          echo "--- 内核版本自检 ---"
+          REL=$(make -s $MAKE_ARGS kernelrelease)
+          echo "kernelrelease = $REL"
+          echo "$REL" > /tmp/kernelrelease.txt
+          if [ "$REL" != "4.19.191${LV}" ]; then
+            echo "::error::kernelrelease 不是 4.19.191${LV}，刷入后 vendor 模块会加载失败"
+            exit 1
+          fi
+
+      # ------------------------------------------------------------------
+      # 5. 编译
+      # ------------------------------------------------------------------
+      - name: Build kernel
+        run: |
+          cd kernel
+          export LOCALVERSION=""
+          EXTRA=""
+          if [ "${{ inputs.use_llvm_ias }}" = "1" ]; then EXTRA="LLVM_IAS=1"; fi
+          make O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
+               CROSS_COMPILE=aarch64-linux-gnu- $EXTRA \
+               -j"$(nproc)" Image.gz-dtb 2>&1 | tee build.log
+          echo "exit=$?"
+          echo "error 行数: $(grep -c 'error:' build.log || true)"
+          ls -lh out/arch/arm64/boot/Image.gz-dtb
+
+      # ------------------------------------------------------------------
+      # 6. 校验产物：版本串 + 补丁真的在核心里
+      # ------------------------------------------------------------------
+      - name: Verify artifacts
+        run: |
+          set -e
+          cd kernel
+          IMG=out/arch/arm64/boot/Image
+          test -f "$IMG"
+          echo "--- 内核版本串 ---"
+          grep -ao "Linux version [ -~]\{10,120\}" "$IMG" | head -2 || true
+          echo "--- vermagic ---"
+          grep -ao "[0-9.]*-perf[-a-z0-9]* SMP preempt mod_unload[ -~]*" "$IMG" | head -2 || true
+          echo "--- 补丁标记 earth-fix ---"
+          grep -ac "earth-fix" "$IMG" || true
+          if ! grep -aq "earth-fix" "$IMG"; then
+            echo "::error::内核里找不到 earth-fix 标记，补丁可能没生效"
+            exit 1
+          fi
+
+      # ------------------------------------------------------------------
+      # 7. 打 AnyKernel3 刷机包（保留设备现有 ramdisk，自动处理 A/B 槽）
+      # ------------------------------------------------------------------
+      - name: Package AnyKernel3 zip
+        if: always()
+        run: |
+          set -e
+          IMG=kernel/out/arch/arm64/boot/Image.gz-dtb
+          if [ ! -f "$IMG" ]; then echo "无内核产物，跳过打包"; exit 0; fi
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3 -b master ak3
+          rm -rf ak3/.git ak3/.github
+          cp "$IMG" ak3/Image.gz-dtb
+          cat > ak3/anykernel.sh <<'EOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          ## Redmi 12C / POCO C55 (earth, MT6768, A/B)
+          kernel.string=earth 4.19.191 + nvt charger-mode disabled
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=earth
+          device.name2=earth_global
+          device.name3=22120RN86G
+          BLOCK=boot;
+          IS_SLOT_DEVICE=1;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+          . tools/ak3-core.sh;
+          split_boot;
+          flash_boot;
+          EOF
+          (cd ak3 && zip -r9 ../AnyKernel3-earth-touchfix.zip . >/dev/null)
+          unzip -t AnyKernel3-earth-touchfix.zip >/dev/null
+          ls -lh AnyKernel3-earth-touchfix.zip
+
+      - name: Collect outputs
+        if: always()
+        run: |
+          mkdir -p dist
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb dist/ 2>/dev/null || true
+          cp kernel/out/arch/arm64/boot/Image.gz dist/ 2>/dev/null || true
+          cp kernel/out/arch/arm64/boot/Image dist/ 2>/dev/null || true
+          find kernel/out -name "*.dtb" -o -name "*.dtbo" 2>/dev/null | while read -r f; do cp "$f" dist/ 2>/dev/null || true; done
+          cp kernel/build.log dist/ 2>/dev/null || true
+          cp /tmp/kernelrelease.txt dist/ 2>/dev/null || true
+          cp AnyKernel3-earth-touchfix.zip dist/ 2>/dev/null || true
+          ls -lh dist
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: earth-kernel-touchfix
+          path: dist/*
+          retention-days: 30
